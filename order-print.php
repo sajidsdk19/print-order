@@ -3,7 +3,7 @@
  * Plugin Name: WooCommerce Print Orders
  * Plugin URI: https://sajidkhan.me
  * Description: Add print functionality to WooCommerce orders in admin dashboard. Print single orders or bulk print multiple orders with professional formatting. Compatible with HPOS.
- * Version: 1.1.0
+ * Version: 1.2.0
  * Author: Sajid Khan
  * Author URI: https://sajidkhan.me
  * License: GPL v2 or later
@@ -20,17 +20,17 @@
  * @author Sajid Khan
  */
 
+// Prevent direct access
+if (!defined('ABSPATH')) {
+    exit;
+}
+
 // Declare HPOS compatibility
 add_action('before_woocommerce_init', function() {
     if (class_exists('\Automattic\WooCommerce\Utilities\FeaturesUtil')) {
         \Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility('custom_order_tables', __FILE__, true);
     }
 });
-
-// Prevent direct access
-if (!defined('ABSPATH')) {
-    exit;
-}
 
 // Check if WooCommerce is active
 if (!in_array('woocommerce/woocommerce.php', apply_filters('active_plugins', get_option('active_plugins')))) {
@@ -45,7 +45,7 @@ class WC_Print_Orders {
     /**
      * Plugin version
      */
-    const VERSION = '1.1.0';
+    const VERSION = '1.2.0';
     
     /**
      * Plugin instance
@@ -76,9 +76,17 @@ class WC_Print_Orders {
         add_action('init', array($this, 'load_textdomain'));
         add_action('admin_init', array($this, 'check_woocommerce'));
         
-        // Order actions
+        // Order actions - Multiple priority levels to ensure it loads
         add_filter('woocommerce_admin_order_actions', array($this, 'add_print_order_action'), 10, 2);
+        add_filter('woocommerce_admin_order_actions', array($this, 'add_print_order_action'), 20, 2);
+        
+        // Add print button to individual order page (next to refund button)
+        add_action('woocommerce_order_item_add_action_buttons', array($this, 'add_order_print_button'));
+        
+        // CSS and scripts
         add_action('admin_head', array($this, 'add_print_order_css'));
+        
+        // AJAX handler
         add_action('wp_ajax_print_order', array($this, 'handle_print_order_request'));
         
         // Bulk actions - Use HPOS compatible hooks
@@ -129,12 +137,48 @@ class WC_Print_Orders {
      * Add print action to order actions dropdown
      */
     public function add_print_order_action($actions, $order) {
+        // Ensure we have a valid order object
+        if (!$order || !is_object($order)) {
+            return $actions;
+        }
+        
+        // Get order ID - compatible with both WC_Order and WP_Post objects
+        $order_id = is_a($order, 'WC_Order') ? $order->get_id() : $order->ID;
+        
+        if (!$order_id) {
+            return $actions;
+        }
+        
+        // Add the print action
         $actions['print_order'] = array(
-            'url'       => wp_nonce_url(admin_url('admin-ajax.php?action=print_order&order_id=' . $order->get_id()), 'print_order'),
+            'url'       => wp_nonce_url(admin_url('admin-ajax.php?action=print_order&order_id=' . $order_id), 'print_order'),
             'name'      => __('Print Order', 'wc-print-orders'),
             'action'    => "print_order",
         );
+        
         return $actions;
+    }
+    
+    /**
+     * Add print button to individual order page (next to refund button)
+     */
+    public function add_order_print_button($order) {
+        if (!$order || !is_object($order)) {
+            return;
+        }
+        
+        $order_id = is_a($order, 'WC_Order') ? $order->get_id() : $order->ID;
+        
+        if (!$order_id) {
+            return;
+        }
+        
+        $print_url = wp_nonce_url(admin_url('admin-ajax.php?action=print_order&order_id=' . $order_id), 'print_order');
+        
+        echo '<button type="button" class="button button-primary print-order-btn" onclick="window.open(\'' . esc_url($print_url) . '\', \'_blank\')">';
+        echo '<span class="dashicons dashicons-media-document" style="margin-right: 5px;"></span>';
+        echo __('Print Order', 'wc-print-orders');
+        echo '</button>';
     }
     
     /**
@@ -146,16 +190,75 @@ class WC_Print_Orders {
         if ($screen && (
             $screen->id === 'edit-shop_order' || 
             $screen->id === 'woocommerce_page_wc-orders' ||
-            $screen->base === 'woocommerce_page_wc-orders'
+            $screen->base === 'woocommerce_page_wc-orders' ||
+            strpos($screen->id, 'wc-orders') !== false ||
+            $screen->id === 'shop_order' // Individual order edit page
         )) {
             echo '<style>
+                /* Print button styling for orders list */
                 .print_order::after {
-                    font-family: Dashicons;
+                    font-family: Dashicons !important;
                     content: "\f179" !important;
-                    color: #999;
+                    color: #999 !important;
+                    font-size: 16px !important;
                 }
                 .print_order:hover::after {
-                    color: #2271b1;
+                    color: #2271b1 !important;
+                }
+                
+                /* Alternative styling if dashicons don\'t work */
+                .wc-action-button-print_order::after {
+                    font-family: Dashicons !important;
+                    content: "\f179" !important;
+                    color: #999 !important;
+                }
+                .wc-action-button-print_order:hover::after {
+                    color: #2271b1 !important;
+                }
+                
+                /* Make sure the action buttons are visible */
+                .order_actions .wc-action-button {
+                    display: inline-block !important;
+                    margin-right: 2px !important;
+                }
+                
+                /* Debug styling to make buttons more visible */
+                .order_actions {
+                    min-width: 80px !important;
+                }
+                
+                /* Force display if hidden */
+                .woocommerce_page_wc-orders .order_actions a[data-tip*="Print"] {
+                    display: inline-block !important;
+                }
+                
+                /* Styling for print button on individual order page */
+                .print-order-btn {
+                    margin-left: 10px !important;
+                    background: #2271b1 !important;
+                    border-color: #2271b1 !important;
+                    color: white !important;
+                    display: inline-flex !important;
+                    align-items: center !important;
+                    text-decoration: none !important;
+                }
+                
+                .print-order-btn:hover {
+                    background: #135e96 !important;
+                    border-color: #135e96 !important;
+                    color: white !important;
+                }
+                
+                .print-order-btn .dashicons {
+                    font-size: 16px !important;
+                    width: 16px !important;
+                    height: 16px !important;
+                    line-height: 1 !important;
+                }
+                
+                /* Ensure the button appears inline with other action buttons */
+                .wc-order-item-add-action-buttons .print-order-btn {
+                    vertical-align: top !important;
                 }
             </style>';
         }
@@ -841,19 +944,6 @@ add_action('plugins_loaded', function() {
     if (class_exists('WC_Print_Orders')) {
         // Plugin loaded successfully
         do_action('wc_print_orders_loaded');
-        
-        // Check HPOS compatibility
-        if (class_exists('\Automattic\WooCommerce\Utilities\OrderUtil')) {
-            // HPOS is available - plugin will work with both traditional and HPOS
-            add_action('admin_notices', function() {
-                if (get_current_screen() && get_current_screen()->id === 'plugins') {
-                    echo '<div class="notice notice-success is-dismissible">';
-                    echo '<p><strong>' . __('WooCommerce Print Orders:', 'wc-print-orders') . '</strong> ';
-                    echo __('Plugin is fully compatible with High-Performance Order Storage (HPOS).', 'wc-print-orders');
-                    echo '</p></div>';
-                }
-            });
-        }
     }
 });
 
