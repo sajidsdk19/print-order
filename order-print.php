@@ -2,8 +2,8 @@
 /**
  * Plugin Name: WooCommerce Print Orders
  * Plugin URI: https://sajidkhan.me
- * Description: Add print functionality to WooCommerce orders in admin dashboard. Print single orders or bulk print multiple orders with professional formatting.
- * Version: 1.0.0
+ * Description: Add print functionality to WooCommerce orders in admin dashboard. Print single orders or bulk print multiple orders with professional formatting. Compatible with HPOS.
+ * Version: 1.1.0
  * Author: Sajid Khan
  * Author URI: https://sajidkhan.me
  * License: GPL v2 or later
@@ -13,12 +13,19 @@
  * Requires at least: 5.0
  * Tested up to: 6.4
  * Requires PHP: 7.4
- * WC requires at least: 5.0
+ * WC requires at least: 6.0
  * WC tested up to: 8.5
  * 
  * @package WC_Print_Orders
  * @author Sajid Khan
  */
+
+// Declare HPOS compatibility
+add_action('before_woocommerce_init', function() {
+    if (class_exists('\Automattic\WooCommerce\Utilities\FeaturesUtil')) {
+        \Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility('custom_order_tables', __FILE__, true);
+    }
+});
 
 // Prevent direct access
 if (!defined('ABSPATH')) {
@@ -38,7 +45,7 @@ class WC_Print_Orders {
     /**
      * Plugin version
      */
-    const VERSION = '1.0.0';
+    const VERSION = '1.1.0';
     
     /**
      * Plugin instance
@@ -74,7 +81,11 @@ class WC_Print_Orders {
         add_action('admin_head', array($this, 'add_print_order_css'));
         add_action('wp_ajax_print_order', array($this, 'handle_print_order_request'));
         
-        // Bulk actions
+        // Bulk actions - Use HPOS compatible hooks
+        add_filter('bulk_actions-woocommerce_page_wc-orders', array($this, 'add_bulk_print_action'));
+        add_filter('handle_bulk_actions-woocommerce_page_wc-orders', array($this, 'handle_bulk_print_orders'), 10, 3);
+        
+        // Legacy support for older WooCommerce versions
         add_filter('bulk_actions-edit-shop_order', array($this, 'add_bulk_print_action'));
         add_filter('handle_bulk_actions-edit-shop_order', array($this, 'handle_bulk_print_orders'), 10, 3);
         
@@ -131,7 +142,12 @@ class WC_Print_Orders {
      */
     public function add_print_order_css() {
         $screen = get_current_screen();
-        if ($screen && $screen->id === 'edit-shop_order') {
+        // Support both HPOS and legacy order screens
+        if ($screen && (
+            $screen->id === 'edit-shop_order' || 
+            $screen->id === 'woocommerce_page_wc-orders' ||
+            $screen->base === 'woocommerce_page_wc-orders'
+        )) {
             echo '<style>
                 .print_order::after {
                     font-family: Dashicons;
@@ -160,9 +176,11 @@ class WC_Print_Orders {
         }
         
         $order_id = intval($_GET['order_id']);
+        
+        // Use HPOS compatible method to get order
         $order = wc_get_order($order_id);
         
-        if (!$order) {
+        if (!$order || !is_a($order, 'WC_Order')) {
             wp_die(__('Order not found', 'wc-print-orders'));
         }
         
@@ -603,8 +621,21 @@ class WC_Print_Orders {
             return $redirect_to;
         }
         
+        // Ensure we have valid order IDs
+        $order_ids = array();
+        foreach ($post_ids as $id) {
+            $order = wc_get_order($id);
+            if ($order && is_a($order, 'WC_Order')) {
+                $order_ids[] = $id;
+            }
+        }
+        
+        if (empty($order_ids)) {
+            return add_query_arg('bulk_print_error', '1', $redirect_to);
+        }
+        
         // Generate print page for multiple orders
-        $this->generate_bulk_print_page($post_ids);
+        $this->generate_bulk_print_page($order_ids);
         exit;
     }
     
@@ -702,7 +733,7 @@ class WC_Print_Orders {
 
             <?php foreach ($order_ids as $order_id) : 
                 $order = wc_get_order($order_id);
-                if (!$order) continue;
+                if (!$order || !is_a($order, 'WC_Order')) continue;
             ?>
             <div class="order-summary">
                 <div class="order-title"><?php printf(__('Order #%s', 'wc-print-orders'), $order->get_id()); ?></div>
@@ -764,8 +795,17 @@ class WC_Print_Orders {
             wp_die(__('This plugin requires WooCommerce to be installed and active.', 'wc-print-orders'));
         }
         
+        // Check WooCommerce version
+        if (version_compare(WC()->version, '6.0', '<')) {
+            deactivate_plugins(plugin_basename(__FILE__));
+            wp_die(__('This plugin requires WooCommerce version 6.0 or higher.', 'wc-print-orders'));
+        }
+        
         // Flush rewrite rules
         flush_rewrite_rules();
+        
+        // Add activation timestamp
+        update_option('wc_print_orders_activated', time());
     }
     
     /**
@@ -774,6 +814,9 @@ class WC_Print_Orders {
     public function deactivate() {
         // Cleanup if needed
         flush_rewrite_rules();
+        
+        // Remove activation timestamp
+        delete_option('wc_print_orders_activated');
     }
     
     /**
@@ -792,11 +835,43 @@ class WC_Print_Orders {
 WC_Print_Orders::get_instance();
 
 /**
- * Check for plugin updates (optional)
+ * Check for plugin updates and HPOS compatibility
  */
 add_action('plugins_loaded', function() {
     if (class_exists('WC_Print_Orders')) {
         // Plugin loaded successfully
         do_action('wc_print_orders_loaded');
+        
+        // Check HPOS compatibility
+        if (class_exists('\Automattic\WooCommerce\Utilities\OrderUtil')) {
+            // HPOS is available - plugin will work with both traditional and HPOS
+            add_action('admin_notices', function() {
+                if (get_current_screen() && get_current_screen()->id === 'plugins') {
+                    echo '<div class="notice notice-success is-dismissible">';
+                    echo '<p><strong>' . __('WooCommerce Print Orders:', 'wc-print-orders') . '</strong> ';
+                    echo __('Plugin is fully compatible with High-Performance Order Storage (HPOS).', 'wc-print-orders');
+                    echo '</p></div>';
+                }
+            });
+        }
     }
 });
+
+/**
+ * Add admin notice for bulk print errors
+ */
+add_action('admin_notices', function() {
+    if (isset($_GET['bulk_print_error']) && $_GET['bulk_print_error'] === '1') {
+        echo '<div class="notice notice-error is-dismissible">';
+        echo '<p>' . __('No valid orders found to print.', 'wc-print-orders') . '</p>';
+        echo '</div>';
+    }
+});
+
+/**
+ * Helper function to check if HPOS is enabled
+ */
+function wc_print_orders_is_hpos_enabled() {
+    return class_exists('\Automattic\WooCommerce\Utilities\OrderUtil') && 
+           \Automattic\WooCommerce\Utilities\OrderUtil::custom_orders_table_usage_is_enabled();
+}
